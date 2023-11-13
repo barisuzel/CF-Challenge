@@ -1,0 +1,521 @@
+---
+title: "Assignment"
+author: "Baris Uzel"
+date: "2023-11-11"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Assignment
+```{r}
+
+#load packages
+library(raster)
+library(rasterVis)
+library(ncdf4)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(animation)
+```
+
+## Data Import & Preparation
+
+```{r}
+#Import environmental data - Please download all the data into a folder called data and set working the directory outside the data folder.  
+
+tempdata <- brick("data/2mtemp.nc") #Import temperature data
+evodata <- brick("data/totalevaporation.nc") #Import total evaporation data
+precipdata <-brick("data/totalprecipitation.nc") #Import total precipitation data
+socdata <- raster("data/galicia_soc.tif") # Import soil organic carbon stock data
+landdata <- raster("data/lccglobal.nc") # Import global land cover classification data
+
+
+frame <- extent(c(-8.3, -7.3, 41.8, 42.8)) # Coordinates for cropping extent
+
+gal_soc <- crop(socdata, extent(frame))
+gal_land <- crop(landdata, extent(frame))
+gal_precip <- crop(precipdata, extent(frame))
+gal_temp <- crop(tempdata, extent(frame))
+gal_evo <- crop(evodata, extent(frame))
+
+```
+## Reprojection
+
+```{r}
+
+# Assign minimum resolution
+resolutions <- c(res(gal_precip), res(gal_temp), res(gal_evo), res(gal_soc), res(gal_land))
+min_resolution <- min(resolutions) # determine minimum resolution
+projection <- crs(gal_temp) # Define collective coordinate system
+crs(gal_land) <-projection #landclassification data missing appropriate projection
+
+# Reproject using coordinate system and minimum resolution
+projection_temp <- projectRaster(gal_temp, crs = projection, method = "ngb", res = min_resolution, block.size =c(25,25))
+projection_precip <- projectRaster(gal_precip, crs = projection, method = "ngb", res = min_resolution, block.size =c(25,25))
+projection_evo <- projectRaster(gal_evo, crs = projection, method = "ngb", res = min_resolution, block.size =c(25,25))
+projection_soc <- projectRaster(gal_soc, crs = projection, method = "ngb", res = min_resolution, block.size =c(25,25))
+projection_land <- projectRaster(gal_land, crs = projection, method = "ngb", res = min_resolution, block.size =c(25,25))
+
+```
+
+#Creating basic maps to explore data
+```{r}
+scsmap <- levelplot(projection_soc, margin = FALSE, #mapping soil carbon stocks
+          main = "Soil Carbon Stocks of Galicia, Spain (t/ha)",
+          col.regions = colorRampPalette(c("light green", "dark green"))(20))
+
+png("galicia_scs.png", width = 800, height = 600)   #Save soil carbon stock map to our working                                                           directory
+scsmap
+dev.off()
+
+# RGB values for each land cover class according to CDS Documentation
+lcc_rgb <- matrix(c(
+  0, 0, 0,   # No Data
+  255, 255, 0,   # Cropland, rainfed
+  170, 240, 240,   # Cropland, irrigated or post-flooding
+  220, 240, 100,   # Mosaic cropland / natural vegetation
+  200, 200, 100,   # Mosaic natural vegetation / cropland
+  0, 100, 0,   # Tree cover, broadleaved, evergreen
+  0, 160, 0,   # Tree cover, broadleaved, deciduous
+  0, 60, 0,   # Tree cover, needleleaved, evergreen
+  40, 80, 0,   # Tree cover, needleleaved, deciduous
+  120, 130, 0,   # Tree cover, mixed leaf type
+  140, 160, 0,   # Mosaic tree and shrub / herbaceous cover
+  190, 150, 0,   # Mosaic herbaceous cover / tree and shrub
+  150,  100, 0,   # Shrubland
+  255, 180, 50,   # Grassland
+  255, 220, 210,   # Lichens and mosses
+  255, 235, 175,   # Sparse vegetation
+  0, 120, 90,   # Tree cover, flooded, fresh or brackish water
+  0, 150, 120,   # Tree cover, flooded, saline water
+  0, 220, 130,   # Shrub or herbaceous cover, flooded
+  195, 20,   0,   # Urban areas
+  255, 245, 215,   # Bare areas
+    0,   70, 200,   # Water bodies
+  255, 255, 255    # Permanent snow and ice
+), ncol = 3, byrow = TRUE)
+
+
+lcc_colours <- apply(lcc_rgb, 1, function(rgb) rgb(rgb[1], rgb[2], rgb[3], maxColorValue = 255)) #Assign RGB values to land cover classes
+lcc_colourmap <- setNames(lcc_colours, seq(0, 220, by = 10)) # Create vector to map land cover codes to RGB colors
+
+
+lccplot <-  levelplot(   # Plot Land cover classification
+    projection_land,  
+    margin = FALSE, 
+    main = "Land Cover Classification of Galicia, Spain", 
+    col.regions = lcc_colourmap,
+    at = seq(0, 220, length.out = nrow(lcc_rgb) + 1), 
+    colorkey = list(
+      labels = list(
+        at = seq(0, 220, length.out = nrow(lcc_rgb)),
+        labels = c(
+        "No Data", "Cropland, rainfed", "Cropland, irrigated or post-flooding", 
+        "Mosaic cropland / natural vegetation", "Mosaic natural vegetation / cropland",
+        "Tree cover, broadleaved, evergreen", "Tree cover, broadleaved, deciduous", 
+        "Tree cover, needleleaved, evergreen", "Tree cover, needleleaved, deciduous",
+        "Tree cover, mixed leaf type", "Mosaic tree and shrub / herbaceous cover",
+        "Mosaic herbaceous cover / tree and shrub", "Shrubland", "Grassland", 
+        "Lichens and mosses", "Sparse vegetation",
+        "Tree cover, flooded, fresh or brackish water", 
+        "Tree cover, flooded, saline water", 
+        "Shrub or herbaceous cover, flooded", "Urban areas", 
+        "Bare areas", "Water bodies", "Permanent snow and ice")),
+    width = 1,  
+    height = 1,  
+    space = "right"))
+
+png("galicia_lcc.png", width = 800, height = 600)   #Save land cover classification map
+lccplot
+dev.off()
+```
+#Create a Time-series animation for visualization
+
+```{r}
+years <- 2000:2022 #define year range
+
+
+# Below are loops that create calendar plots of every year between 2000:2022 and save them as the environmental variable+calendar year. The three loops do the same function for Evapotranspiration, Temperature, and Precipitation respectively. 
+
+for (year in years) {                       #Evapotranspiration
+  start_layer <- (year - 2000) * 12 + 1
+  end_layer <- start_layer + 11
+  
+  current_months <- rep(month.abb, length.out = end_layer - start_layer + 1)
+  
+  current_evaporation <- levelplot(
+    projection_evo,
+    layers = start_layer:end_layer,
+    main = paste("Monthly Average Evapotranspiration for the year", year,
+                 "(m of water eq.)"),
+    names.attr = current_months,
+    colorkey = list(
+      width = 1,
+      height = 1,
+      space = "right"
+    )
+  )
+  
+  assign(paste0("Evaporation", year), current_evaporation)
+}
+
+for (year in years) {                   #Temperature
+  start_layer <- (year - 2000) * 12 + 1
+  end_layer <- start_layer + 11
+  
+  current_months <- rep(month.abb, length.out = end_layer - start_layer + 1)
+  
+  current_temperature <- levelplot(
+    projection_temp,
+    layers = start_layer:end_layer,
+    main = paste("Monthly Average Temperature for the year", year,"(K)"),
+    names.attr = current_months,
+    colorkey = list(
+      width = 1,
+      height = 1,
+      space = "right"
+    )
+  )
+  
+  assign(paste0("Temperature", year), current_temperature)
+}
+
+for (year in years) {                         #Precipitation
+  start_layer <- (year - 2000) * 12 + 1
+  end_layer <- start_layer + 11
+  
+  current_months <- rep(month.abb, length.out = end_layer - start_layer + 1)
+  
+  current_precipitation <- levelplot(
+    projection_precip,
+    layers = start_layer:end_layer,
+    main = paste("Monthly Average Precipitation for the year", year,"(m)"),
+    names.attr = current_months,
+    colorkey = list(
+      width = 1,
+      height = 1,
+      space = "right"
+    )
+  )
+  
+  assign(paste0("Precipitation", year), current_precipitation)
+}
+
+## Create Time Series Animations.
+#The 3 loops below create time series animations of rasters. This is a good supplementary way to visualize the change in evaporation/temperature/precipitation over the map.  
+saveGIF({
+  for (year in years) {
+    current_plot <- get(paste0("Evaporation",year))
+    print(current_plot)
+  }
+}, movie.name = "Evaporation_timseries.gif", ani.width = 800, ani.height = 600, interval = 1)
+
+
+saveGIF({
+  for (year in years) {
+    current_plot <- get(paste0("Temperature",year))
+    print(current_plot)
+  }
+}, movie.name = "Temperature_timseries.gif", ani.width = 800, ani.height = 600, interval = 1)
+
+
+saveGIF({
+  for (year in years) {
+    current_plot <- get(paste0("Precipitation",year))
+    print(current_plot)
+  }
+}, movie.name = "Precipitation_timseries.gif", ani.width = 800, ani.height = 600, interval = 1)
+
+```
+# My initial strategy for joint analysis was to:
+#     1. Overay land cover classification raster on to the temp, precip, evo rasterBricks
+#     2. Extract the temp/precip/evo/ values for each land cover class.
+#     3. Take the mean for every variable for every land cover at every month of year.
+#     4. Create a 'traditional' timeseries to visualize trends.
+#     5. Chose landcover/variable combinations of interest
+
+#This approach to 'traditional timeseries' and spatial statistics proved to be computationally demanding. The results of my first loop (see code chunk below) took a very long time to process and after an overnight run attempt, I chose to continue my analysis with a different format..
+
+```{r}
+
+temp_results <- list()   # An empty list to store the results
+custom_function <- function(x, y) {     #mean
+  mean(x, na.rm = TRUE)
+}
+
+for (i in 1:nlayers(projection_temp)) {
+  result_layer <- raster::overlay(projection_temp[[i]], projection_land, fun = custom_function)
+  temp_results[[i]] <- result_layer
+}
+templandoverlay <- brick(temp_results)
+print(temp_results)
+
+```
+
+
+# Instead of loading my data as rasters, I am going to load it as NetCDF format and continue 'traditional time-series' and spatial statistics in this format. 
+
+```{r}
+#Load Data
+tempnc <- nc_open("data/2mtemp.nc")
+evonc <- nc_open("data/totalevaporation.nc")
+precipnc <-nc_open("data/totalprecipitation.nc")
+globallandnc <- nc_open("data/lccglobal.nc")
+
+#Extract lat,long,time
+lat <- ncvar_get(tempnc, "latitude")
+lon <- ncvar_get(tempnc, "longitude")
+time <-ncvar_get(tempnc, "time") 
+time <- as.POSIXct(time * 3600, origin = "1900-01-01", tz = "GMT")
+lonlattime <- as.matrix(expand.grid(lon,lat,time))
+
+#Extract variables and store in vector form
+temp_array <- ncvar_get(tempnc, "t2m")
+evo_array <- ncvar_get(evonc, "e")
+precip_array <- ncvar_get(precipnc, "tp")
+temp_vec <- as.vector(temp_array)
+evo_vec <- as.vector(evo_array)
+precip_vec <- as.vector(precip_array)
+
+
+#Build dataframe
+envdata <- data.frame(cbind(lonlattime, temp_vec, evo_vec, precip_vec))
+colnames(envdata) <- c("Lon","Lat","Date","Temp", "Evo", "Precip")
+envdata$Date <- as.Date(envdata$Date)
+envdata$Temp <- as.numeric(envdata$Temp)
+envdata$Evo <- as.numeric(envdata$Evo)
+envdata$Precip <- as.numeric(envdata$Precip)
+print(envdata)
+
+#Make Temperature Time Series
+tempseries <- envdata %>%
+                group_by(Date) %>%
+                summarize(Temp = mean(Temp, na.rm = TRUE))  %>%
+                  mutate(Temp.C = Temp-273.15)
+
+tempseries <- tempseries %>%
+  ggplot(aes(x=Date, y=Temp.C)) +
+  geom_point(size=0.2, color="black") +
+  geom_line(size=0.5, color="black") +
+  labs(title = "Monthly average temperature (°C) in Galicia, Spain between 2000-2022",
+       x = "Year",
+       y = "Temperature (°C)") +
+  theme_classic()
+tempseries
+
+#Evaporation Time Series
+evoseries <- envdata %>%
+                group_by(Date) %>%
+                summarize(Evo = mean(Evo, na.rm = TRUE)) %>%
+                  mutate(Evo = abs(Evo))
+
+
+evoseries <- evoseries %>%
+  ggplot(aes(x=Date, y=Evo)) +
+  geom_point(size=0.2, color="black") +
+  geom_line(size=0.5, color="black") +
+  labs(title = "Monthly average evaporation in Galicia, Spain between 2000-2022",
+       x = "Year",
+       y = "Evapotranspiration (m water eq.)") +
+  theme_classic()
+evoseries
+
+
+#Precipitation Time Series
+precipseries <- envdata %>%
+                group_by(Date) %>%
+                summarize(Precip = mean(Precip, na.rm = TRUE))
+
+precipseries <- precipseries %>%
+  ggplot(aes(x=Date, y=Precip)) +
+  geom_point(size=0.2, color="black") +
+  geom_line(size=0.5, color="black") +
+  labs(title = "Monthly average precipitation in Galicia, Spain between 2000-2022",
+       x = "Year",
+       y = "Precipitation (m)") +
+  theme_classic()
+
+precipseries
+```
+
+#Now I want to investigate if things have changed BY landcover
+#To do that I need to crop and interpolate the globallandcover classificationt data that has a much finer spatial resolution. 
+```{r}
+#Load Data
+globallandnc <- nc_open("data/lccglobal.nc") #different spatial resolution
+tempnc <- nc_open("data/2mtemp.nc")
+
+
+#Extract lat & long
+landlat <- ncvar_get(globallandnc, "lat")
+landlon <- ncvar_get(globallandnc, "lon")
+landlat<- subset(landlat, landlat >= 41.8 & landlat <= 42.8) #crop to frame
+landlon <- subset(landlon, landlon >= -8.3 & landlon <= -7.3)
+lonlat <- as.matrix(expand.grid(landlon,landlat))
+
+#Extract variables based on lat lon
+lat <- ncvar_get(tempnc, "latitude")
+lon <- ncvar_get(tempnc, "longitude")
+
+lat_min <- min(lat)
+lat_max <- max(lat)
+lon_min <- min(lon)
+lon_max <- max(lon)
+
+#Extract landcover classifications within the coordinate range
+land_array <- ncvar_get(globallandnc, "lccs_class", 
+                       start = c(which(globallandnc$dim$lon$vals >= lon_min & globallandnc$dim$lon$vals <= lon_max)[1], 
+                                 which(globallandnc$dim$lat$vals >= lat_min & globallandnc$dim$lat$vals <= lat_max)[1], 
+                                 1), 
+                       count = c(length(which(globallandnc$dim$lon$vals >= lon_min & globallandnc$dim$lon$vals <= lon_max)), 
+                                 length(which(globallandnc$dim$lat$vals >= lat_min & globallandnc$dim$lat$vals <= lat_max)), 
+                                 1, ncol(globallandnc)))
+
+#Build the dataframe
+land_vec <- as.vector(land_array)
+landcoverdata <- data.frame(cbind(lonlat, land_vec))
+colnames(landcoverdata) <- c("Lon", "Lat", "landcover")
+
+
+##Interpolation - Below I interpolate the fine land cover classification data to the same spatial resolution as the coarser environmental variable data. 
+
+#I define the spatial resolution
+lon_values <- seq(-7.3, -8.3, by = -0.1)
+lat_values <- seq(42.8, 41.8, by = -0.1)
+
+s_resolution <- expand.grid(lon = lon_values, lat = lat_values)
+
+#Define the interpolation function. The method I chose here is to count all landcover classifications in +and- 0.1 lat/long range of the point and assign the value of the most common (or most repeating) classification within that range. 
+function_interpolation <- function(lon_start, lon_end, lat_start, lat_end, data) {
+  data %>%
+    filter(between(Lon, lon_start, lon_end) & between(Lat, lat_start, lat_end)) %>%
+    group_by(landcover) %>%
+    summarize(count = n()) %>%
+    arrange(desc(count)) %>%
+    slice(1) %>%
+    pull(landcover)
+}
+#perform interpolation
+interpolation <- s_resolution %>%
+  rowwise() %>%
+  mutate(landcover = function_interpolation(lon - 0.1, lon + 0.1, lat - 0.1, lat + 0.1, landcoverdata))
+
+#check results
+print(interpolation)
+
+#Merge datasets
+colnames(interpolation) <- c("Lon", "Lat", "landcover")
+all_data <- merge(envdata, interpolation, by = c("Lon", "Lat"))
+
+##Now that we have all datasets in one folder, we can make the categorical timeseries
+
+#add classification to data
+all_data <- all_data %>%
+  mutate(classification = case_when(
+    landcover == 10 ~ "Cropland, rainfed",
+    landcover == 40 ~ "Mosaic natural vegetation / cropland",
+    landcover == 60 ~ "Tree cover, broadleaved, deciduous",
+    landcover == 70 ~ "Tree cover, needleleaved, evergreen",
+    landcover == 100 ~ "Mosaic tree and shrub / herbaceous cover",
+    landcover == 130 ~ "Grassland",
+  ))
+
+#group temperature, evapotranspiration, and precipitation by classification
+all_data_temp <- all_data %>%
+  group_by(classification, Date) %>%
+  summarize(mean_temp = mean(Temp))
+
+all_data_evo <- all_data %>%
+  group_by(classification, Date) %>%
+  summarize(mean_evo = mean(Evo))
+
+all_data_precip <- all_data %>%
+  group_by(classification, Date) %>%
+  summarize(mean_precip = mean(Precip))
+
+#Unit Conversion
+all_data_temp <- all_data_temp %>%
+                  mutate(Temp.C = mean_temp-273.15)
+all_data_temp
+#Define Standard Colours as per CDS documentation
+class_colors <- c(
+  "Cropland, rainfed" = rgb(255, 255, 0, maxColorValue = 255),
+  "Mosaic natural vegetation / cropland" = rgb(200, 200, 100, maxColorValue = 255),
+  "Tree cover, broadleaved, deciduous" = rgb(0, 160, 0, maxColorValue = 255),
+  "Tree cover, needleleaved, evergreen" = rgb(0, 60, 0, maxColorValue = 255),
+  "Mosaic tree and shrub / herbaceous cover" = rgb(140, 160, 0, maxColorValue = 255),
+  "Grassland" = rgb(255, 180, 50, maxColorValue = 255)
+)
+
+#Plot
+tempbyclass <- ggplot(all_data_temp, aes(x = Date, y = Temp.C, color = classification, group = classification)) +
+  geom_line() +
+  labs(title = "Temperature Trends by Landcover Classification",
+       x = "Date",
+       y = "Mean Temperature (°C)") +
+  theme_classic() +
+    theme(legend.key.size = unit(0.1, "cm"),
+        legend.position = "bottom") +
+  guides(color = guide_legend(keywidth = 0.8, keyheight = 0.5, title.position = "top"))
+
+png("temperature_timeseries_byclass.png", width = 800, height = 600)  #Save
+tempbyclass
+dev.off()
+
+evobyclass <- ggplot(all_data_evo, aes(x = Date, y = mean_evo, color = classification, group = classification)) +
+  geom_line() +
+  labs(title = "Evaporation Trends by Landcover Classification",
+       x = "Date",
+       y = "Mean Evapotranspiration (m water eq.)") +
+  theme_classic() +
+    theme(legend.key.size = unit(0.1, "cm"),
+        legend.position = "bottom") +
+  guides(color = guide_legend(keywidth = 0.8, keyheight = 0.5, title.position = "top"))
+
+png("evapotranspiration_timeseries_byclass", width = 800, height = 600)  #Save
+evobyclass
+dev.off()
+
+precipbyclass <- ggplot(all_data_precip, aes(x = Date, y = mean_precip, color = classification, group = classification)) +
+  geom_line() +
+  labs(title = "Precipitation Trends by Landcover Classification",
+       x = "Date",
+       y = "Mean Precipitation (m)") +
+  theme_classic() +
+    theme(legend.key.size = unit(0.1, "cm"),
+        legend.position = "bottom") +
+  guides(color = guide_legend(keywidth = 0.8, keyheight = 0.5, title.position = "top"))
+
+png("precipitation_timeseries_byclass.png", width = 800, height = 600)  #Save
+precipbyclass
+dev.off()
+
+```
+
+#Sampling Design
+```{r}
+
+soc_values <- extract(gal_soc, frame) #extract SOC values
+print(mean(soc_values)) # determine mean
+print(sd(soc_values))   # determine the standard deviation
+
+# 95% confidence level = Z score 1.96
+Zsq <- 1.96^2
+#Standard deviation squared
+Sdsq <- 14.8^2
+# 10% of mean for margin of error
+E <- (0.1*81)^2
+
+#Finalize equation
+sample_size <- (Zsq*Sdsq/E)
+print(sample_size) # 13 samples would have to be taken in the region to have 95% CI
+
+
+## Final Comments on Sampling
+
+#If I was to create a sampling plan in the region (or any region for that matter), my goal would be to account for as much soil variability as possible with enough repetitions. To achieve this, I would take additional soil data such as moisture and elevation to be able to capture the variability in low/high moisture soils, low/high elevation soils, and so on. I would build a model to generate specific sampling points on locations that represent this variability. Of course, in that case I would revise the above calculation and the samples necessary would increase to have 95%CI.
+```
